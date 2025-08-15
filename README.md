@@ -1,6 +1,6 @@
-# 🗣️ Voice Command Integration with ROS 2
+# 🕹️ Joystick Module Integration with ROS 2
 
-This project demonstrates how to control a **ROS 2**-based `turtlesim` robot using **voice commands** captured via a microphone. It uses a Python-based **speech recognition module** to recognize spoken directions and communicates them over **Serial** to an **Arduino**, which interprets the commands and sends them back to the ROS 2 node to control the turtle’s motion in real time. 🐢
+This project demonstrates how to integrate a joystick module with a **ROS 2** environment. It involves reading analog joystick input (X, Y axes, and optional button press) from an Arduino, sending it over **Serial**, and using a **ROS 2 Python node** to read and publish that data to `turtle1/cmd_vel`, allowing joystick control of **Turtlesim**. 🐢
 
 ---
 
@@ -9,83 +9,109 @@ This project demonstrates how to control a **ROS 2**-based `turtlesim` robot usi
 * Ubuntu 22.04 (recommended)
 * Python 3
 * Arduino board (e.g., Uno or Nano)
-* USB microphone
+* Joystick module
 * ROS 2 Humble installed
-* Python `speech_recognition` and `pyserial` packages
 
 ---
 
 ## 🛠️ Step 1: Install ROS 2 Humble
 
-> Follow same ROS 2 installation instructions as in your joystick README.
+```bash
+sudo apt update && sudo apt upgrade -y
+
+# Set locale
+sudo locale-gen en_US en_US.UTF-8
+sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+# Setup sources
+sudo apt install software-properties-common -y
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install curl -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+
+# Install ROS 2 Humble
+sudo apt update
+sudo apt install ros-humble-desktop -y
+
+# Source ROS 2
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+
+# Install colcon & dependencies
+sudo apt install python3-colcon-common-extensions python3-rosdep -y
+sudo rosdep init
+rosdep update
+```
 
 ---
 
 ## 🧱 Step 2: Create a ROS 2 Workspace
 
 ```bash
-mkdir -p ~/voice_ws/src
-cd ~/voice_ws
+mkdir -p ~/joy_ws/src
+cd ~/joy_ws
 colcon build
 source install/setup.bash
-````
-
----
-
-## 🧠 Step 3: Arduino Code (Listen via Serial)
-
-**Wiring:**
-
-* No sensor input needed – only USB connection for serial listening.
-
-**Upload this code using Arduino IDE:**
-
-```cpp
-// Arduino code: Forward serial command to serial monitor
-
-String command = "";
-
-void setup() {
-  Serial.begin(115200);
-}
-
-void loop() {
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n') {
-      Serial.println(command);  // Echo the command back
-      command = "";
-    } else {
-      command += c;
-    }
-  }
-}
 ```
 
 ---
 
-## 🧠 Step 4: ROS 2 Voice Node (Python)
+## 📡 Step 3: Arduino Joystick Code (Send Serial Data)
 
-Inside `voice_ws/src`, create your package:
+**Wiring:**
+
+* VRx → A0
+* VRy → A1
+* SW → D3 (optional button)
+
+**Upload the following code using Arduino IDE:**
+
+```cpp
+// Arduino code: Send joystick X and Y only
+
+void setup() {
+  Serial.begin(115200);  // Match baudrate with Python node
+}
+
+void loop() {
+  int xVal = analogRead(A0);
+  int yVal = analogRead(A1);
+
+  Serial.print(xVal);
+  Serial.print(",");
+  Serial.println(yVal);  // Newline ends the message
+
+  delay(50);  // Reduce spamming
+}
+
+```
+
+---
+
+## 🤖 Step 4: ROS 2 Serial Node (Python)
+
+Inside `joy_ws/src`, create a package:
 
 ```bash
-cd ~/voice_ws/src
-ros2 pkg create voice_controller --build-type ament_python --dependencies rclpy geometry_msgs
+cd ~/joy_ws/src
+ros2 pkg create joy_controller --build-type ament_python --dependencies rclpy geometry_msgs
 ```
 
 ### 📁 Directory Structure:
 
 ```
-voice_controller/
-├── voice_controller
-│   └── voice_node.py
+joy_controller/
+├── joy_controller
+│   └── joystick_node.py
 ├── package.xml
 ├── setup.py
 └── resource/
-    └── voice_controller
+    └── joy_controller
 ```
 
-### ✏️ `voice_node.py`
+### ✏️ `joystick_node.py`
 
 ```python
 #!/usr/bin/env python3
@@ -94,16 +120,20 @@ import serial
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-import speech_recognition as sr
 
 
-class VoiceToTurtle(Node):
+class JoystickSerialToTurtle(Node):
     def __init__(self):
-        super().__init__("voice_to_turtle")
+        super().__init__("joystick_serial_to_turtle")
 
-        self.port_ = "/dev/ttyACM0"
-        self.baudrate_ = 115200
+        # Parameters
+        self.declare_parameter("port", "/dev/ttyACM0")
+        self.declare_parameter("baudrate", 115200)
 
+        self.port_ = self.get_parameter("port").value
+        self.baudrate_ = self.get_parameter("baudrate").value
+
+        # Serial connection
         try:
             self.arduino_ = serial.Serial(port=self.port_, baudrate=self.baudrate_, timeout=0.1)
             self.get_logger().info(f"Connected to Arduino on {self.port_}")
@@ -111,71 +141,70 @@ class VoiceToTurtle(Node):
             self.get_logger().error(f"Could not connect to Arduino on {self.port_}")
             exit(1)
 
+        # Publisher
         self.cmd_vel_pub_ = self.create_publisher(Twist, "/turtle1/cmd_vel", 10)
 
-        self.recognizer_ = sr.Recognizer()
-        self.microphone_ = sr.Microphone()
+        # Timer
+        self.timer_ = self.create_timer(0.05, self.timerCallback)  # 20Hz
 
-        self.timer_ = self.create_timer(3.0, self.listen_and_publish)
+    def timerCallback(self):
+        if rclpy.ok() and self.arduino_.is_open:
+            try:
+                line = self.arduino_.readline().decode("utf-8").strip()
+                if not line:
+                    return
 
-    def listen_and_publish(self):
-        with self.microphone_ as source:
-            self.get_logger().info("🎤 Listening...")
-            audio = self.recognizer_.listen(source, phrase_time_limit=3)
+                parts = line.split(',')
+                if len(parts) != 2:
+                    return
 
-        try:
-            text = self.recognizer_.recognize_google(audio).lower()
-            self.get_logger().info(f"✅ Recognized: {text}")
+                x_val, y_val = map(int, parts)
 
-            # Send to Arduino (optional)
-            self.arduino_.write((text + "\n").encode())
+                # Normalize and apply deadzone
+                linear = (y_val - 512) / 512.0
+                angular = -(x_val - 512) / 512.0
 
-            twist = Twist()
+                deadzone = 0.1
+                if abs(linear) < deadzone:
+                    linear = 0.0
+                if abs(angular) < deadzone:
+                    angular = 0.0
 
-            if "forward" in text:
-                twist.linear.x = 1.0
-            elif "backward" in text:
-                twist.linear.x = -1.0
-            elif "left" in text:
-                twist.angular.z = 1.0
-            elif "right" in text:
-                twist.angular.z = -1.0
-            elif "stop" in text:
-                twist.linear.x = 0.0
-                twist.angular.z = 0.0
-            else:
-                self.get_logger().info("⚠️ Unknown command")
+                # Publish to turtle
+                twist = Twist()
+                twist.linear.x = linear
+                twist.angular.z = angular
+                self.cmd_vel_pub_.publish(twist)
 
-            self.cmd_vel_pub_.publish(twist)
-
-        except sr.UnknownValueError:
-            self.get_logger().warn("Could not understand audio")
-        except Exception as e:
-            self.get_logger().error(f"Recognition failed: {e}")
+            except Exception as e:
+                self.get_logger().error(f"Serial read failed: {e}")
 
 
 def main():
     rclpy.init()
-    node = VoiceToTurtle()
+    node = JoystickSerialToTurtle()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+
 ```
 
 ---
 
 ### 📄 `package.xml`
 
+Replace with:
+
 ```xml
 <?xml version="1.0"?>
 <package format="3">
-  <name>voice_controller</name>
+  <name>joystick_serial</name>
   <version>0.0.1</version>
-  <description>Voice-controlled ROS 2 Turtlesim project</description>
+  <description>Joystick to ROS 2 Turtlesim control via serial</description>
 
   <maintainer email="you@example.com">Your Name</maintainer>
   <license>MIT</license>
@@ -192,7 +221,7 @@ if __name__ == "__main__":
 ```python
 from setuptools import setup
 
-package_name = 'voice_controller'
+package_name = 'joystick_serial'
 
 setup(
     name=package_name,
@@ -202,11 +231,11 @@ setup(
     zip_safe=True,
     maintainer='Your Name',
     maintainer_email='you@example.com',
-    description='Voice command interface for ROS 2 Turtlesim',
+    description='Joystick module integration with ROS 2 via serial',
     license='MIT',
     entry_points={
         'console_scripts': [
-            'voice_node = voice_controller.voice_node:main',
+            'joystick_node = joy_controller.joystick_node:main',
         ],
     },
 )
@@ -217,9 +246,24 @@ setup(
 ## 🧪 Step 5: Build and Run
 
 ```bash
-cd ~/voice_ws
+cd ~/joy_ws
 colcon build
 source install/setup.bash
+```
+
+### 🔌 Connect Arduino:
+
+Check the port:
+
+```bash
+ls /dev/ttyUSB*
+```
+
+If permission denied:
+
+```bash
+sudo usermod -a -G dialout $USER
+# Then reboot
 ```
 
 ---
@@ -232,33 +276,40 @@ source install/setup.bash
 ros2 run turtlesim turtlesim_node
 ```
 
-### In **Terminal 2** – Run the voice node:
+### In **Terminal 2** – Run your joystick node:
 
 ```bash
-source ~/voice_ws/install/setup.bash
-ros2 run voice_controller voice_node
+source ~/joy_ws/install/setup.bash
+ros2 run joy_controller joystick_node
 ```
 
-Now speak into your mic: “forward”, “left”, “stop” etc., and see the turtle respond 🐢
+Move your joystick and watch 🐢 `turtle1` move in real time!
 
 ---
 
 ## 🧰 Useful Terminal Commands
 
-| Command                            | Description                       |
-| ---------------------------------- | --------------------------------- |
-| `ros2 topic echo /turtle1/cmd_vel` | View movement messages            |
-| `ros2 node list`                   | View running ROS nodes            |
-| `arecord --list-devices`           | Check if mic is detected          |
-| `python3 -m speech_recognition`    | Test voice recognition standalone |
+| Command                                                       | Description                            |
+| ------------------------------------------------------------- | -------------------------------------- |
+| `ros2 node list`                                              | List all available nodes               |
+| `ros2 topic list`                                             | List all available topics              |
+| `ros2 topic echo /turtle1/cmd_vel`                            | View velocity commands being published |
+| `ros2 run turtlesim turtle_teleop_key`                        | Manual keyboard control                |
+| `colcon build --packages-select joystick_serial`              | Build only this package                |
+| `ros2 pkg create --build-type ament_python your_package_name` | Create a new Python-based package      |
 
 ---
 
 ## ✅ Extra Tips
 
-* Tune speech recognition timeout and sensitivity.
-* Add feedback using LEDs or turtle color changes.
-* Test offline with [Vosk](https://alphacephei.com/vosk/) for offline voice recognition.
+* You can tweak sensitivity by adjusting the mapping logic in `joystick_node.py`.
+* Use `serial.tools.list_ports` in Python to auto-detect the port.
+* Add a launch file for easy startup automation.
 
 ---
 
+## 📃 License
+
+MIT License.
+
+---
